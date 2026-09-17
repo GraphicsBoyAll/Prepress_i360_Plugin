@@ -19,6 +19,30 @@ open while you work: select artwork, zoom, edit, then click **Run tool**.
 The four tools themselves are unmodified. They are the original `.jsx` files,
 byte for byte, sitting in `src/tools/`.
 
+## Is it self-contained? Do I have to run it?
+
+**Self-contained:** yes in the sense that matters — no libraries, no installer,
+no internet, no dependency beyond the ExtendScript engine already inside
+Illustrator. It is not a single-file package though: it is a launcher plus a
+`tools` folder that must stay together.
+
+**Do you have to run it:** that is your choice, and it is the difference between
+install Option B and Option C.
+
+| | How it starts | Needs admin |
+| --- | --- | --- |
+| **A** — run from a folder | **File > Scripts > Other Script...** each session | No |
+| **B** — Scripts menu | **File > Scripts > Prepress i360** each session | Yes |
+| **C** — startup loader | **Opens by itself when Illustrator starts** | Yes |
+
+Option C puts one small loader file in Illustrator's `Startup Scripts` folder.
+After that nobody runs anything: the panel is on screen when Illustrator opens.
+That is the closest this can get to a plugin without a signed CEP extension.
+
+There is still no `.zxp` and no double-click installer. Producing one would mean
+a CEP extension and a code-signing certificate, for a panel that would behave
+the same and still call the same ExtendScript.
+
 ## The tools
 
 | Tool | Needs | What it does |

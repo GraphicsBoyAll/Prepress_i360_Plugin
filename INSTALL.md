@@ -6,13 +6,18 @@ Either way, keep `Prepress i360.jsx` and the `tools` folder **together in the
 same folder**. The launcher finds its tools by looking next to itself.
 
 ```
-Prepress i360.jsx
+Prepress i360.jsx          <- the launcher
 tools/
     used_colors_panel.jsx
     find_double_cutcontour.jsx
     auto_measure_pro.jsx
     isometric_build_view.jsx
+startup/
+    Prepress i360 Startup.jsx   <- only for Option C; does not live here once installed
 ```
+
+`startup/Prepress i360 Startup.jsx` is a separate loader used only by Option C
+below. It is the one file that gets copied somewhere else.
 
 ---
 
@@ -55,6 +60,75 @@ rights.
 
 Scripts added while Illustrator is running do not appear in the menu until the
 next launch, so the restart in step 1 is not optional.
+
+---
+
+## Option C — open by itself every time Illustrator starts
+
+This is the closest thing to a real plugin. The panel is there when Illustrator
+opens and nobody runs anything. It needs write access to the Illustrator
+application folder, so admin rights.
+
+Do Option A or B first, so the launcher and tools are installed somewhere.
+
+1. Open `startup/Prepress i360 Startup.jsx` in a text editor and set one line to
+   the folder holding `Prepress i360.jsx` and `tools`:
+
+   ```js
+   var PREPRESS_I360_HOME = "C:/Prepress i360";
+   ```
+
+   Use forward slashes on both platforms. Backslashes have to be escaped in
+   JavaScript and are easy to get wrong.
+
+   | | Example |
+   | --- | --- |
+   | Windows | `"C:/Prepress i360"` |
+   | macOS | `"/Users/Shared/Prepress i360"` |
+   | Network share | `"//server/share/Prepress i360"` |
+
+2. Quit Illustrator.
+
+3. Copy **only that one file** into Illustrator's `Startup Scripts` folder,
+   creating the folder if it is not already there:
+
+   **Windows**
+   ```
+   C:\Program Files\Adobe\Adobe Illustrator <version>\Startup Scripts\
+   ```
+
+   **macOS**
+   ```
+   /Applications/Adobe Illustrator <version>/Startup Scripts/
+   ```
+
+   On Windows there is also a shared location that applies across installs, if
+   you prefer it:
+   ```
+   C:\Program Files\Common Files\Adobe\Startup Scripts CC\Illustrator\
+   ```
+
+4. Start Illustrator. The panel opens on its own.
+
+The launcher itself stays where you put it in step 1. Only the loader goes in
+`Startup Scripts`, so updating a tool never means touching the application
+folder again.
+
+### If it does not appear
+
+The loader is deliberately silent. It runs while Illustrator is starting, so a
+wrong path or a missing folder makes it do nothing rather than put a dialog in
+front of whoever opens Illustrator. Nothing is broken; the panel is just absent.
+
+To find out why, run `Prepress i360.jsx` from **File > Scripts** once. That path
+does report errors and will tell you what is wrong — almost always
+`PREPRESS_I360_HOME` pointing at the wrong folder.
+
+### Closing and reopening it
+
+Closing the panel closes it for that Illustrator session. To get it back without
+restarting, run `Prepress i360.jsx` from **File > Scripts**. Option C and the
+Scripts menu coexist; installing one does not rule out the other.
 
 ---
 
@@ -135,6 +209,17 @@ name matches exactly, including case, on macOS.
 You installed with Option B but did not restart Illustrator, or the file went
 into the wrong `Presets` language folder.
 
+**Two panels appeared**
+Startup scripts are documented to run at launch and again when a script is
+chosen from the Scripts menu. The launcher guards against this by leaving an
+already-open panel alone when it is auto-started. If you still see two, close
+both and run `Prepress i360.jsx` from **File > Scripts** once; that closes any
+open panel and builds exactly one.
+
+**The auto-start panel did not open**
+See *If it does not appear* under Option C. The loader fails silently on
+purpose.
+
 **I edited the registry and the panel still shows the old list**
 Run the launcher again from **File > Scripts**. It closes the open panel and
 builds a fresh one, so edits show up without restarting Illustrator.
@@ -150,4 +235,5 @@ is inside the tool's own `.jsx`, which is where to look.
 - [Install and run scripts in Illustrator](https://helpx.adobe.com/illustrator/desktop/automate-visualize-data/automate-actions/install-and-run-scripts.html) — Adobe: the Scripts folder, and that scripts added while Illustrator is running do not appear until the next launch
 - [How to Install Scripts in Adobe Illustrator](https://creativepro.com/how-to-install-scripts-in-adobe-illustrator/) — CreativePro: per-platform paths, the `Presets/<language>` layout, and the admin-access note
 - [Executing Scripts — Adobe Illustrator Scripting Guide](https://ai-scripting.docsforadobe.dev/introduction/executingScripts/) — running a script from outside the Scripts folder
+- [Run script on startup](https://community.adobe.com/t5/illustrator-discussions/run-script-on-startup/td-p/12138028) — Adobe Community: the `Startup Scripts` folder, and the shared `Common Files/Adobe/Startup Scripts CC/Illustrator` location on Windows
 - [Create persistent palette via ScriptUI](https://community.adobe.com/t5/illustrator-discussions/create-persistent-palette-via-scriptui/td-p/10757849) — Adobe Community: `#targetengine` and palette persistence

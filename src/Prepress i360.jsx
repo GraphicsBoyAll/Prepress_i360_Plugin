@@ -100,7 +100,7 @@ var PREPRESS_I360_PANEL_MODE = "palette";
 (function () {
 
     var APP_NAME       = "Prepress i360";
-    var APP_VERSION    = "1.1.0";
+    var APP_VERSION    = "1.2.0";
     var TOOLS_DIR_NAME = "tools";
 
     /* =====================================================================
@@ -209,12 +209,33 @@ var PREPRESS_I360_PANEL_MODE = "palette";
         return (f && f.exists) ? f : null;
     }
 
+    /* True when the startup loader in the Startup Scripts folder pulled us in,
+     * rather than the operator running the launcher from File > Scripts.
+     * Nothing may prompt or alert in that state: it would land on top of
+     * Illustrator's launch. */
+    function isAutoStart() {
+        try { return $.global.PREPRESS_I360_AUTOSTART === true; }
+        catch (e) { return false; }
+    }
+
     function resolveToolsFolder() {
+        /* The startup loader passes the install folder in, because $.fileName
+         * is not dependable when a script is loaded from Startup Scripts. */
+        try {
+            if ($.global.PREPRESS_I360_HOME) {
+                var fromHome = new Folder(String($.global.PREPRESS_I360_HOME) + "/" + TOOLS_DIR_NAME);
+                if (fromHome.exists) { return fromHome; }
+            }
+        } catch (e0) {}
+
         var me = thisScriptFile();
         if (me !== null) {
             var beside = new Folder(me.parent.fsName + "/" + TOOLS_DIR_NAME);
             if (beside.exists) { return beside; }
         }
+
+        /* Give up quietly rather than prompting during Illustrator's launch. */
+        if (isAutoStart()) { return null; }
 
         var answer = confirm(
             APP_NAME + " could not find its \"" + TOOLS_DIR_NAME + "\" folder.\n\n" +
@@ -793,33 +814,45 @@ var PREPRESS_I360_PANEL_MODE = "palette";
      * ================================================================== */
 
     function main() {
+        var auto = isAutoStart();
+
         var folder = resolveToolsFolder();
         if (folder === null) {
-            alert(APP_NAME + " cannot run without its tools folder.\n\n" +
-                  "Reinstall the folder so that \"" + TOOLS_DIR_NAME + "\" sits next to the launcher, " +
-                  "then run it again.", APP_NAME);
+            if (!auto) {
+                alert(APP_NAME + " cannot run without its tools folder.\n\n" +
+                      "Reinstall the folder so that \"" + TOOLS_DIR_NAME + "\" sits next to the launcher, " +
+                      "then run it again.", APP_NAME);
+            }
             return;
         }
 
         var tools = buildToolList(folder);
         if (tools.length === 0) {
-            alert("No scripts were found in the tools folder.\n\n" + folder.fsName, APP_NAME);
+            if (!auto) {
+                alert("No scripts were found in the tools folder.\n\n" + folder.fsName, APP_NAME);
+            }
             return;
         }
 
         if (PREPRESS_I360_PANEL_MODE === "dialog") {
+            /* A modal dialog during Illustrator's launch would block it, so
+             * dialog mode simply does not auto-start. */
+            if (auto) { return; }
             dialogLoop(tools, folder);
             return;
         }
 
-        /* Palette mode. Running the launcher again closes the panel that is
-         * already open and builds a fresh one, so an edit to the registry shows
-         * up without restarting Illustrator. */
-        try {
-            if ($.global.PREPRESS_I360_PANEL) {
-                $.global.PREPRESS_I360_PANEL.close();
-            }
-        } catch (e) {}
+        var existing = null;
+        try { existing = $.global.PREPRESS_I360_PANEL; } catch (e) {}
+
+        /* Startup scripts are documented to run at launch and again when a
+         * script is chosen from the Scripts menu. Leave an open panel alone
+         * rather than stacking a second one on top of it. */
+        if (auto && existing) { return; }
+
+        /* Run by hand, though: close the open panel and build a fresh one, so
+         * an edit to the registry shows up without restarting Illustrator. */
+        try { if (existing) { existing.close(); } } catch (e2) {}
 
         $.global.PREPRESS_I360_PANEL = showPalette(tools, folder);
     }
@@ -827,7 +860,13 @@ var PREPRESS_I360_PANEL_MODE = "palette";
     try {
         main();
     } catch (err) {
-        alert(APP_NAME + " stopped:\n\n" + describeError(err), APP_NAME);
+        if (isAutoStart()) {
+            /* Never let a fault here interrupt Illustrator's launch. Running
+             * the launcher by hand from File > Scripts will report it. */
+            try { $.writeln(APP_NAME + " startup failed: " + describeError(err)); } catch (e3) {}
+        } else {
+            alert(APP_NAME + " stopped:\n\n" + describeError(err), APP_NAME);
+        }
     }
 
 })();

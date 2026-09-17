@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.2.0
+
+The panel can now open by itself when Illustrator starts, so nobody has to run
+a script.
+
+### Added
+
+- `src/startup/Prepress i360 Startup.jsx`, a loader for Illustrator's
+  `Startup Scripts` folder. One file, one editable path line. The launcher and
+  tools stay where they are, so updating a tool never means touching the
+  application folder again. Install Option C in INSTALL.md.
+- The loader is silent by design: it runs during Illustrator's launch, so a
+  wrong path or missing folder makes it do nothing rather than put a dialog in
+  front of whoever opens Illustrator. Running the launcher from File > Scripts
+  still reports errors normally.
+- `PREPRESS_I360_HOME`, set by the loader, tells the launcher where it lives.
+  `$.fileName` is not dependable when a script is loaded from Startup Scripts,
+  so the path is passed in rather than worked out.
+- `PREPRESS_I360_AUTOSTART` marks an auto-started run. In that state the
+  launcher never prompts or alerts, dialog mode does not open at all (a modal
+  dialog would block Illustrator's launch), and an already-open panel is left
+  alone instead of having a second one stacked on it. Startup scripts are
+  documented to run at launch and again when a script is chosen from the
+  Scripts menu, and panels stacking up from that is a reported problem.
+
+### Note on what this is
+
+Still not a `.zxp` or a double-click installer. It is a launcher plus a tools
+folder that must stay together, with an optional loader that starts it. It has
+no dependency beyond the ExtendScript engine inside Illustrator. A signed CEP
+extension would install more conventionally but would behave the same and still
+call the same ExtendScript.
+
+The four tool scripts remain byte-for-byte copies of the originals.
+
 ## 1.1.0
 
 The launcher no longer locks Illustrator while it is open.
