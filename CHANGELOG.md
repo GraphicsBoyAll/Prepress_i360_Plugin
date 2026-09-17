@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.1.0
+
+The launcher no longer locks Illustrator while it is open.
+
+### Changed
+
+- The launcher is now a floating `palette` window by default instead of a modal
+  dialog. It stays open while you work, so artwork can be selected with the
+  panel on screen. **Isometric Build View** no longer needs the launcher closed
+  to make a selection.
+- Tools are dispatched to Illustrator through `BridgeTalk` in palette mode,
+  because a palette's event handlers do not get a correct Illustrator object
+  model.
+- The script now runs under `#targetengine "main"` so the panel survives after
+  the script that created it has finished.
+- Preflight checks moved into the dispatched message, since the panel cannot see
+  the document itself. Results come back through `onResult` and update the
+  Status column and the session log in place.
+- Running the launcher again closes the open panel and builds a fresh one, so a
+  registry edit shows up without restarting Illustrator.
+
+### Added
+
+- `PREPRESS_I360_PANEL_MODE` at the top of the launcher, set to `"palette"` or
+  `"dialog"`. Dialog mode is the previous 1.0.0 behaviour, kept as a fallback:
+  no BridgeTalk, no persistent engine, fewer moving parts.
+- A direct-execution fallback if `BridgeTalk` is unavailable, rather than
+  failing outright.
+- A busy state that disables the buttons while a tool is running.
+
+### Not changed, and worth being clear about
+
+Illustrator still pauses while a tool is actually running. ExtendScript executes
+on Illustrator's main thread with no threading and no asynchronous execution, so
+the application is busy for the duration of a tool's work and the panel is
+frozen along with it. BridgeTalk changes which context the code runs in, not
+whether it blocks. Auto Measure Pro, at 24,662 lines, pauses Illustrator
+noticeably. No ExtendScript, CEP or UXP plugin changes this; only doing less
+work in the tool would.
+
+The four tool scripts remain byte-for-byte copies of the originals.
+
 ## 1.0.0
 
 First release. Brings the four existing prepress scripts under one launcher.

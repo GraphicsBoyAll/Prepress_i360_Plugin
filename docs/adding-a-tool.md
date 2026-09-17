@@ -115,6 +115,26 @@ All four commands printing nothing means the tool is safe to re-run. Anything
 printed is state that survives into the next run, and needs either a wrapper or
 a reason why it is harmless.
 
+## If your tool looks up its own file path
+
+In palette mode the launcher hands your tool to Illustrator inside a
+`BridgeTalk` message. `$.fileName` is documented as unavailable inside a
+BridgeTalk message, which is why the launcher resolves the tools folder in the
+panel and passes each tool's absolute path into the message rather than looking
+it up on the far side.
+
+Your tool is then loaded with `$.evalFile()`, one level down from that. Whether
+`$.fileName` reports your tool's own path at that point has **not** been
+verified here, and it is not worth guessing about. So:
+
+- A tool that never asks where it lives is unaffected. All four shipped tools
+  are in this category.
+- A tool that uses `$.fileName` to find a sidecar file, a preset or an icon
+  needs testing in palette mode specifically, not just dialog mode. If it comes
+  back empty, either hard-code the location, ask the operator once and remember
+  the answer, or add the path to the tool's registry entry and have the launcher
+  pass it in.
+
 ## Syntax check before committing
 
 ExtendScript is close enough to ES3 that Node will catch syntax errors. Strip

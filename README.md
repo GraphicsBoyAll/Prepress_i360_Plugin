@@ -4,8 +4,6 @@ An Adobe Illustrator tool set for the Allegra / Image360 prepress workflow. One
 launcher shows every tool in a single list, so an operator can work down the
 list and run whichever ones the job needs.
 
-![list-driven](https://img.shields.io/badge/UI-ScriptUI%20dialog-informational)
-
 ---
 
 ## What it is
@@ -13,8 +11,10 @@ list and run whichever ones the job needs.
 `Prepress i360.jsx` is a launcher. It shows the available tools in one list
 with, for each one, what it does, what it will change in the document, and its
 known limits. It checks the document is in a fit state before running a tool,
-runs it, then reopens the list so the next tool can be picked without going back
-to the **File > Scripts** menu.
+runs it, and reports what happened.
+
+By default it is a **floating panel that does not lock Illustrator**. It stays
+open while you work: select artwork, zoom, edit, then click **Run tool**.
 
 The four tools themselves are unmodified. They are the original `.jsx` files,
 byte for byte, sitting in `src/tools/`.
@@ -40,6 +40,42 @@ the document. The launcher shows a confirmation prompt before it runs, with
 **No** as the default. That warning is the script author's, carried through
 unchanged, not an added disclaimer.
 
+---
+
+## Panel modes
+
+One setting at the top of `src/Prepress i360.jsx` picks how the launcher
+behaves:
+
+```js
+var PREPRESS_I360_PANEL_MODE = "palette";
+```
+
+| Mode | Behaviour |
+| --- | --- |
+| `"palette"` | **Default.** Floating panel. Does not lock Illustrator. Stays open while you work, so you can select artwork with the panel open. Tools are dispatched through BridgeTalk. |
+| `"dialog"` | Modal dialog. Locks Illustrator while open, reopens after each run. Fewer moving parts, no BridgeTalk, no persistent engine. The fallback if the palette misbehaves on a given install. |
+
+Both modes run the same tools through the same preflight checks and report
+results the same way. Switching is a one-line edit.
+
+### What "does not lock Illustrator" does and does not mean
+
+**It does** mean the panel no longer blocks Illustrator while it sits open. You
+can select artwork, zoom, and edit with the panel on screen. That was the part
+getting in the way, and it is fixed.
+
+**It does not** mean Illustrator stays responsive while a tool is actually
+running. ExtendScript executes on Illustrator's main thread, with no threading
+and no asynchronous execution. While a tool is doing its work, Illustrator is
+busy, and the panel is frozen along with it. BridgeTalk changes which context
+the code runs in, not whether it blocks.
+
+Auto Measure Pro is 24,662 lines and will visibly pause the application while it
+runs. That is not a bug in the launcher, and no ExtendScript, CEP or UXP plugin
+can change it. The only way to shorten that pause is to make the tool itself do
+less work.
+
 ## Install
 
 See [INSTALL.md](INSTALL.md). In short: copy `src/` to wherever you keep
@@ -55,9 +91,9 @@ to `REGISTRY`. See [docs/adding-a-tool.md](docs/adding-a-tool.md).
 
 ---
 
-## Why this shape and not a docked panel
+## How it is built, and why
 
-Three constraints decided it, each one checked rather than assumed.
+Three constraints decided the shape, each one checked rather than assumed.
 
 **UXP is not an option.** UXP is Adobe's modern plugin framework, but it is not
 publicly available for Illustrator to third-party developers. Porting
@@ -69,17 +105,26 @@ only public panel framework for Illustrator, but an unsigned CEP extension will
 not load unless `PlayerDebugMode` is set: a registry entry under
 `HKEY_CURRENT_USER/Software/Adobe/CSXS.12` on Windows, or
 `defaults write com.adobe.CSXS.12 PlayerDebugMode 1` on macOS. Avoiding that
-means shipping a signed ZXP, which needs a code-signing certificate.
+means shipping a signed ZXP, which needs a code-signing certificate. It would
+also not have helped with the lock: a CEP panel calls ExtendScript through
+`evalScript`, which still runs on Illustrator's main thread.
 
-**A ScriptUI palette cannot reach the document.** A palette window can float and
-dock, but code in its event handlers has no reliable access to the Illustrator
-document object model, so every tool would have to be dispatched through
-`BridgeTalk`. A `dialog` window runs in Illustrator's own context with full
-document access and no indirection.
+**A ScriptUI palette cannot reach the document on its own.** A palette floats
+instead of blocking, but code in its event handlers does not get a correct
+Illustrator object model. The documented way round it is to hand the work to
+Illustrator with a `BridgeTalk` message, which is what the launcher does in
+palette mode. Two consequences shape the code:
 
-So: a modal list that reopens after each run. Nothing to sign, nothing to
-configure, full document access, and it works on any Illustrator that runs
-ExtendScript.
+- `$.fileName` is not available inside a BridgeTalk message, so the tools folder
+  is resolved in the panel and each tool's absolute path is baked into the
+  message as a string literal.
+- The panel cannot see the document, so the preflight checks run inside the
+  message, in Illustrator's context, and the answer comes back on `onResult`.
+
+`#targetengine "main"` puts the launcher in a persistent, named engine so the
+panel survives after the script that created it has finished. Without it the
+panel closes the moment the script ends. `#include` is deliberately not used
+anywhere, because a palette created in an included file closes itself on call.
 
 ## Re-running tools in one Illustrator session
 
@@ -113,5 +158,8 @@ accumulate state across runs. `docs/adding-a-tool.md` has the check for that.
 - [Executing Scripts — Adobe Illustrator Scripting Guide](https://ai-scripting.docsforadobe.dev/introduction/executingScripts/)
 - [CEP 12 HTML Extension Cookbook](https://github.com/Adobe-CEP/CEP-Resources/blob/master/CEP_12.x/Documentation/CEP%2012%20HTML%20Extension%20Cookbook.md) — Adobe, `PlayerDebugMode` requirement for unsigned extensions
 - [UXP for Illustrator: Status & What to Use Today](https://mapsoft.com/posts/illustrator-uxp-status.html) — UXP availability for third-party Illustrator developers
-- [ScriptPanel_2.jsx](https://github.com/Silly-V/Adobe-Illustrator/blob/master/Script%20Panel%202/ScriptPanel_2.jsx) — Silly-V, the BridgeTalk dispatch a ScriptUI palette requires, and the Startup Scripts folder
+- [Create a panel/palette to execute JavaScript code](https://community.adobe.com/t5/illustrator-discussions/create-a-panel-palette-to-execute-javascript-code/td-p/13297876) — Adobe Community, why a palette needs BridgeTalk to reach the Illustrator object model
+- [ScriptPanel_2.jsx](https://github.com/Silly-V/Adobe-Illustrator/blob/master/Script%20Panel%202/ScriptPanel_2.jsx) — Silly-V, BridgeTalk dispatch from a palette, and `$.fileName` being unavailable in a BridgeTalk message
+- [BridgeTalk palette demo](https://gist.github.com/mhulse/eb0ffb2bd365975632d2) — a minimal working Illustrator palette using `bt.target = 'illustrator'` and `#targetengine main`
+- [Create persistent palette via ScriptUI](https://community.adobe.com/t5/illustrator-discussions/create-persistent-palette-via-scriptui/td-p/10757849) — Adobe Community, `#targetengine` for palette persistence, and `#include` closing palettes
 - [Top 2 ExtendScript Mistakes and How to Avoid Them](https://hyperbrew.co/blog/top-2-extendscript-mistakes-and-how-to-avoid-them/) — Hyper Brew, Illustrator's persistent, cumulative ExtendScript engine

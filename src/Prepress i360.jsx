@@ -1,4 +1,4 @@
-#target illustrator
+#targetengine "main"
 
 /*
  * Prepress i360
@@ -7,55 +7,100 @@
  *
  * A launcher panel for the Allegra / Image360 prepress tool set. It shows the
  * available tools in one list, describes what each one does and what it will
- * change, checks that the document is in a fit state to run it, runs it, then
- * comes back to the list so the next tool can be picked.
+ * change, checks the document is in a fit state to run it, runs it, and reports
+ * what happened.
  *
  * Install and run:  see INSTALL.md
  *
  * ----------------------------------------------------------------------------
- * How tools are run
+ * Two panel modes
  * ----------------------------------------------------------------------------
- * Each tool is an ordinary, unmodified .jsx file in the "tools" folder next to
- * this launcher. Every one of them is a self-executing function, so the
- * launcher runs it with $.evalFile() rather than calling into it.
+ * PANEL_MODE below picks how the launcher behaves.
  *
+ *   "palette"  Default. A floating panel that does NOT lock Illustrator. It
+ *              stays open while you work: select artwork, zoom, edit, then
+ *              click Run tool. Tools are dispatched through BridgeTalk.
+ *
+ *   "dialog"   A modal dialog that locks Illustrator while it is open and
+ *              reopens after each run. Fewer moving parts. Keep it as the
+ *              fallback if the palette misbehaves on a particular install.
+ *
+ * ----------------------------------------------------------------------------
+ * What "does not lock Illustrator" does and does not mean
+ * ----------------------------------------------------------------------------
+ * The palette does not block Illustrator while it sits open. That is the part
+ * that was blocking normal work, and it is fixed.
+ *
+ * It does NOT mean Illustrator stays responsive while a tool is actually
+ * running. ExtendScript executes on Illustrator's main thread, and has no
+ * threading and no asynchronous execution. While a tool is doing its work,
+ * Illustrator is busy, and the panel is frozen along with it. BridgeTalk
+ * changes which context the code runs in, not whether it blocks. Auto Measure
+ * Pro is 24,662 lines and will visibly pause the application while it runs.
+ * Nothing in ExtendScript, CEP or UXP changes that.
+ *
+ * ----------------------------------------------------------------------------
+ * Why BridgeTalk, and why #targetengine main
+ * ----------------------------------------------------------------------------
+ * A ScriptUI "palette" window floats instead of blocking, but code running in
+ * its event handlers does not get a correct Illustrator object model. The
+ * documented way round it is to hand the work to Illustrator itself with a
+ * BridgeTalk message, which is what runTool does in palette mode.
+ *
+ * #targetengine main puts the script in a persistent, named engine so the
+ * palette survives after the script that created it has finished. Without it
+ * the panel closes the moment the script ends.
+ *
+ * Two consequences of BridgeTalk that shape the code below:
+ *
+ *   1. $.fileName is not available inside a BridgeTalk message. The tools
+ *      folder is therefore resolved here, in the panel, and each tool's
+ *      absolute path is baked into the message as a string literal.
+ *
+ *   2. The panel cannot see the document, so the preflight checks (is a
+ *      document open, is anything selected) have to run inside the message,
+ *      in Illustrator's context. The answer comes back through onResult.
+ *
+ * #include is deliberately not used anywhere: a palette created in an included
+ * file closes itself on call.
+ *
+ * ----------------------------------------------------------------------------
+ * Re-running tools in one Illustrator session
+ * ----------------------------------------------------------------------------
  * Illustrator keeps one ExtendScript engine alive for the whole application
- * session, and its state is cumulative across every script that has already
- * run. That makes re-running a script that defines globals a fair question. It
- * was checked against these four files rather than assumed:
+ * session and its state is cumulative, so re-running a script that defines
+ * globals is a fair question. It was checked against these four files:
  *
  *   - used_colors_panel, find_double_cutcontour and isometric_build_view each
- *     wrap their entire body in a self-executing function and define nothing
- *     at global scope. They are safe to run any number of times.
+ *     wrap their entire body in a self-executing function and define nothing at
+ *     global scope. Safe to run any number of times.
  *
  *   - auto_measure_pro defines 1013 global functions and layers 61 override
  *     chains of the form  var X_BASE = X;  X = function () { ... X_BASE ... };
  *     Every one of those 61 names also has a real "function NAME(...)"
  *     declaration in the same file. Function declarations are hoisted and
  *     assigned before any statement of the file runs, so each evaluation resets
- *     every name to its pristine version and then rebuilds the override chain
- *     from scratch. The file declares no other top-level vars, no implicit
- *     globals, and never touches $.global. It is therefore also safe to
- *     re-run.
+ *     every name to its pristine version and rebuilds the override chain from
+ *     scratch. It declares no other top-level vars, no implicit globals, and
+ *     never touches $.global. Safe to re-run.
  *
- * If a tool is added later that assigns to a global without "var", or builds an
- * override chain over a name that has no function declaration behind it, that
- * tool will accumulate state across runs. See docs/adding-a-tool.md.
- *
- * ----------------------------------------------------------------------------
- * Why a modal list and not a docked panel
- * ----------------------------------------------------------------------------
- * A ScriptUI "palette" window can float and dock, but code running in its event
- * handlers has no reliable access to the Illustrator document object model, so
- * every tool would have to be dispatched through BridgeTalk. A "dialog" window
- * runs in Illustrator's own context with full document access and no
- * indirection, so the launcher is a dialog that reopens after each run.
+ * See docs/adding-a-tool.md before adding a tool that is not wrapped.
  */
+
+/* ============================================================================
+ * SETTINGS
+ * ========================================================================= */
+
+/* "palette" = floating, does not lock Illustrator.
+ * "dialog"  = modal, locks Illustrator, reopens after each run. */
+var PREPRESS_I360_PANEL_MODE = "palette";
+
+/* ========================================================================= */
 
 (function () {
 
     var APP_NAME       = "Prepress i360";
-    var APP_VERSION    = "1.0.0";
+    var APP_VERSION    = "1.1.0";
     var TOOLS_DIR_NAME = "tools";
 
     /* =====================================================================
@@ -65,15 +110,6 @@
      * tool, drop its .jsx into the tools folder and add an entry. A .jsx in
      * that folder with no entry still appears in the list, just without a
      * description or a preflight check.
-     *
-     * fileName      file in the tools folder
-     * name          label shown in the list
-     * summary       what the tool does
-     * modifies      what it changes in the document, stated plainly
-     * limits        what it does not or cannot do
-     * caution       if set, the operator must confirm before it runs
-     * needsDocument true if an open document is required
-     * needsSelection true if artwork must be selected first
      * ================================================================== */
     var REGISTRY = [
         {
@@ -127,7 +163,8 @@
             modifies:      "Writes to the layers named \"measurements\", \"gaps\" and \"debug\".",
             limits:        "Measurement data only. Proof layout, job data, notes, title blocks and proof sheet " +
                            "composition are produced by the InDesign Auto Proofer, not by this tool. This is a " +
-                           "beta test candidate build."
+                           "beta test candidate build. It is the largest tool here and will pause Illustrator " +
+                           "noticeably while it runs."
         },
         {
             fileName:      "isometric_build_view.jsx",
@@ -148,14 +185,11 @@
 
     /* =====================================================================
      * Locating this script and the tools folder
+     *
+     * This runs in the panel's own context, where $.fileName is available.
+     * It must NOT be called from inside a BridgeTalk message.
      * ================================================================== */
 
-    /* Returns the File this launcher was run from, or null.
-     *
-     * $.fileName is the documented way to ask, and is what works when the
-     * script is run from the Scripts menu. The fallback reads the path off a
-     * deliberately thrown error, which carries the file being executed, for the
-     * cases where $.fileName comes back empty. */
     function thisScriptFile() {
         var f = null;
         try {
@@ -163,6 +197,8 @@
         } catch (e) {}
         if (f && f.exists) { return f; }
 
+        /* Fallback: a deliberately thrown error carries the path of the file
+         * being executed. */
         try {
             PREPRESS_I360_UNDEFINED_ON_PURPOSE.toString();
         } catch (err) {
@@ -173,9 +209,6 @@
         return (f && f.exists) ? f : null;
     }
 
-    /* The tools folder sits next to this launcher. If it cannot be found the
-     * operator is asked to point at it once, so a launcher that has been copied
-     * somewhere else on its own still works. */
     function resolveToolsFolder() {
         var me = thisScriptFile();
         if (me !== null) {
@@ -231,10 +264,6 @@
         return list;
     }
 
-    /* Any .jsx or .js in the tools folder that the registry does not mention is
-     * still offered, so a script can be added by dropping the file in. Nothing
-     * is known about it, so it gets no preflight check beyond "a document is
-     * probably needed". */
     function discoverExtras(folder, known) {
         var found = [];
         var masks = ["*.jsx", "*.js"];
@@ -278,75 +307,11 @@
         return found;
     }
 
-    /* =====================================================================
-     * Preflight and running
-     * ================================================================== */
-
     function needsText(tool) {
         if (tool.needsSelection) { return "Document + selection"; }
         if (tool.needsDocument)  { return "Document"; }
         return "Nothing";
     }
-
-    /* Checked before a tool is run, so the operator gets one clear message
-     * instead of whatever the tool itself would have alerted. */
-    function preflight(tool) {
-        if (!tool.file || !tool.file.exists) {
-            return { ok: false, message:
-                "The script file for " + tool.name + " is not in the tools folder.\n\n" +
-                "Expected: " + tool.fileName };
-        }
-
-        if (tool.needsDocument && app.documents.length === 0) {
-            return { ok: false, message:
-                tool.name + " needs an open document.\n\nOpen the artwork, then run it again." };
-        }
-
-        if (tool.needsSelection) {
-            var selection = null;
-            try { selection = app.activeDocument.selection; } catch (e) { selection = null; }
-            if (selection === null || selection.length === 0) {
-                /* The launcher is a modal dialog, so the operator cannot select
-                 * anything while it is open. Say what to actually do. */
-                return { ok: false, message:
-                    tool.name + " works on whatever is selected, and nothing is selected.\n\n" +
-                    "Close " + APP_NAME + ", select the artwork, then run " + APP_NAME + " again." };
-            }
-        }
-
-        return { ok: true, message: "" };
-    }
-
-    function describeError(err) {
-        var parts = [];
-        try { parts.push(err && err.message ? err.message : String(err)); }
-        catch (e) { parts.push("Unknown error."); }
-        try { if (err.line)     { parts.push("Line " + err.line); } } catch (e2) {}
-        try { if (err.fileName) { parts.push(decodeURI(err.fileName)); } } catch (e3) {}
-        return parts.join("\n");
-    }
-
-    function timeStamp() {
-        var d = new Date();
-        function pad(n) { return (n < 10 ? "0" : "") + n; }
-        return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
-    }
-
-    /* Runs one tool and returns what happened. The launcher window is always
-     * closed before this is called: a modal dialog cannot be open while the
-     * tool puts up a dialog of its own. */
-    function runTool(tool) {
-        try {
-            $.evalFile(tool.file);
-            return { status: "ok", label: "Ran " + timeStamp(), message: "" };
-        } catch (err) {
-            return { status: "error", label: "Error", message: describeError(err) };
-        }
-    }
-
-    /* =====================================================================
-     * Text shown in the description pane
-     * ================================================================== */
 
     function describeTool(tool) {
         var lines = [];
@@ -379,21 +344,316 @@
         return lines.join("\n");
     }
 
+    function timeStamp() {
+        var d = new Date();
+        function pad(n) { return (n < 10 ? "0" : "") + n; }
+        return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    }
+
+    function describeError(err) {
+        var parts = [];
+        try { parts.push(err && err.message ? err.message : String(err)); }
+        catch (e) { parts.push("Unknown error."); }
+        try { if (err.line)     { parts.push("Line " + err.line); } } catch (e2) {}
+        try { if (err.fileName) { parts.push(decodeURI(err.fileName)); } } catch (e3) {}
+        return parts.join("\n");
+    }
+
     /* =====================================================================
-     * The launcher window
+     * The work itself
      *
-     * Returns { action: "run", tool: <tool>, index: <n> }
-     *      or { action: "close" }
+     * PI360_remoteRun is the body of the BridgeTalk message. It is serialised
+     * with Function.toString() and sent to Illustrator, so it must be entirely
+     * self-contained: it cannot see anything outside itself. It also cannot use
+     * $.fileName, which is why it takes the tool's path as an argument.
+     *
+     * It returns a string in the form  "<STATUS>|<message>", which comes back
+     * on the other side as res.body.
+     * ================================================================== */
+    function PI360_remoteRun(fileURI, toolName, needsDocument, needsSelection) {
+        try {
+            var f = new File(fileURI);
+            if (!f.exists) {
+                return "BLOCKED|The script file is missing:\n" + fileURI;
+            }
+
+            if (needsDocument && app.documents.length === 0) {
+                return "BLOCKED|" + toolName + " needs an open document.\n\n" +
+                       "Open the artwork, then click Run tool again.";
+            }
+
+            if (needsSelection) {
+                var sel = null;
+                try { sel = app.activeDocument.selection; } catch (e) { sel = null; }
+                if (sel === null || sel.length === 0) {
+                    return "BLOCKED|" + toolName + " works on whatever is selected, and nothing " +
+                           "is selected.\n\nSelect the artwork, then click Run tool again.";
+                }
+            }
+
+            $.evalFile(f);
+            return "OK|";
+
+        } catch (err) {
+            var msg;
+            try { msg = (err && err.message) ? err.message : String(err); }
+            catch (e2) { msg = "Unknown error."; }
+            try { if (err.line)     { msg += "\nLine " + err.line; } } catch (e3) {}
+            try { if (err.fileName) { msg += "\n" + decodeURI(err.fileName); } } catch (e4) {}
+            return "ERROR|" + msg;
+        }
+    }
+
+    /* Quotes a value as a JavaScript string literal for embedding in a
+     * BridgeTalk message body. */
+    function jsString(value) {
+        var out = String(value);
+        out = out.replace(/\\/g, "\\\\");
+        out = out.replace(/'/g,  "\\'");
+        out = out.replace(/\r/g, "\\r");
+        out = out.replace(/\n/g, "\\n");
+        return "'" + out + "'";
+    }
+
+    /* Splits "<STATUS>|<message>" into its parts. */
+    function parseOutcome(body) {
+        var text = String(body === null || body === undefined ? "" : body);
+        var bar  = text.indexOf("|");
+        if (bar < 0) { return { status: "OK", message: text }; }
+        return { status: text.substring(0, bar), message: text.substring(bar + 1) };
+    }
+
+    /* =====================================================================
+     * PALETTE MODE
+     *
+     * Floating panel. Does not lock Illustrator while it is open. Tools are
+     * handed to Illustrator through BridgeTalk.
      * ================================================================== */
 
-    function showLauncher(tools, state) {
+    function showPalette(tools, folder) {
+        var w = new Window("palette", APP_NAME + "  " + APP_VERSION);
+        w.orientation   = "column";
+        w.alignChildren = "fill";
+        w.margins       = 14;
+        w.spacing       = 9;
+
+        /* ---- tool list --------------------------------------------------- */
+        var pTools = w.add("panel", undefined, "Tools");
+        pTools.orientation   = "column";
+        pTools.alignChildren = "fill";
+        pTools.margins       = 12;
+
+        var lb = pTools.add("listbox", undefined, [], {
+            numberOfColumns: 3,
+            showHeaders:     true,
+            columnTitles:    ["Tool", "Needs", "Status"],
+            columnWidths:    [280, 140, 120]
+        });
+        lb.preferredSize.height = 150;
+
+        var i;
+        for (i = 0; i < tools.length; i++) {
+            var item = lb.add("item", tools[i].name);
+            item.subItems[0].text = needsText(tools[i]);
+            item.subItems[1].text = tools[i].status;
+        }
+
+        /* ---- description ------------------------------------------------- */
+        var pAbout = w.add("panel", undefined, "About the selected tool");
+        pAbout.orientation   = "column";
+        pAbout.alignChildren = "fill";
+        pAbout.margins       = 12;
+
+        var about = pAbout.add("edittext", undefined, "",
+            { multiline: true, readonly: true, scrolling: true });
+        about.preferredSize.height = 170;
+
+        /* ---- session log ------------------------------------------------- */
+        var pLog = w.add("panel", undefined, "This session");
+        pLog.orientation   = "column";
+        pLog.alignChildren = "fill";
+        pLog.margins       = 12;
+
+        var log = pLog.add("edittext", undefined, "Nothing run yet.",
+            { multiline: true, readonly: true, scrolling: true });
+        log.preferredSize.height = 72;
+
+        /* ---- buttons ----------------------------------------------------- */
+        var row = w.add("group");
+        row.orientation   = "row";
+        row.alignChildren = "center";
+
+        var btnFolder = row.add("button", undefined, "Open tools folder");
+
+        var spacer = row.add("group");
+        spacer.alignment = ["fill", "center"];
+
+        var btnClose = row.add("button", undefined, "Close");
+        var btnRun   = row.add("button", undefined, "Run tool");
+
+        /* ---- state ------------------------------------------------------- */
+        var logLines = [];
+        var busy     = false;
+
+        function addLog(line) {
+            logLines.push(line);
+            log.text = logLines.join("\n");
+        }
+
+        function setStatus(index, text) {
+            tools[index].status = text;
+            try { lb.items[index].subItems[1].text = text; } catch (e) {}
+        }
+
+        function refreshAbout() {
+            var sel = lb.selection;
+            if (sel === null) {
+                about.text = "Select a tool from the list above.";
+                btnRun.enabled = false;
+                return;
+            }
+            about.text = describeTool(tools[sel.index]);
+            btnRun.enabled = !busy && tools[sel.index].file.exists;
+        }
+
+        function setBusy(on) {
+            busy = on;
+            btnRun.enabled    = !on && lb.selection !== null;
+            btnFolder.enabled = !on;
+            btnClose.enabled  = !on;
+        }
+
+        /* ---- running ----------------------------------------------------- */
+
+        function finish(index, outcome) {
+            var tool = tools[index];
+
+            if (outcome.status === "OK") {
+                setStatus(index, "Ran " + timeStamp());
+                addLog(tool.name + " - finished " + timeStamp());
+            } else if (outcome.status === "BLOCKED") {
+                setStatus(index, "Not run");
+                addLog(tool.name + " - not run: requirements not met");
+                alert(outcome.message, APP_NAME);
+            } else {
+                setStatus(index, "Error");
+                addLog(tool.name + " - ERROR: " + outcome.message.split("\n")[0]);
+                alert(tool.name + " stopped with an error.\n\n" + outcome.message, APP_NAME);
+            }
+
+            setBusy(false);
+            refreshAbout();
+        }
+
+        function runTool() {
+            var sel = lb.selection;
+            if (sel === null || busy) { return; }
+
+            var index = sel.index;
+            var tool  = tools[index];
+
+            if (!tool.file.exists) {
+                alert("The script file for " + tool.name + " is not in the tools folder.\n\n" +
+                      "Expected: " + tool.fileName, APP_NAME);
+                return;
+            }
+
+            if (tool.caution !== "") {
+                var go = confirm(tool.name + "\n\n" + tool.caution + "\n\nRun it now?", true, APP_NAME);
+                if (!go) {
+                    addLog(tool.name + " - cancelled at the confirmation");
+                    return;
+                }
+            }
+
+            setBusy(true);
+            setStatus(index, "Running...");
+
+            /* Force the repaint now. Once the tool starts, Illustrator is busy
+             * and the panel will not redraw until it finishes. */
+            try { w.update(); } catch (e) {}
+
+            /* BridgeTalk is how a palette gets work done in Illustrator's own
+             * context. If it is not there for any reason, run the tool straight
+             * from here rather than failing: it may work, and if it does not
+             * the error is reported the same way. */
+            if (typeof BridgeTalk === "undefined") {
+                var direct;
+                try {
+                    direct = parseOutcome(PI360_remoteRun(
+                        tool.file.absoluteURI, tool.name,
+                        tool.needsDocument, tool.needsSelection));
+                } catch (e) {
+                    direct = { status: "ERROR", message: describeError(e) };
+                }
+                finish(index, direct);
+                return;
+            }
+
+            var bt = new BridgeTalk();
+            bt.target = "illustrator";
+            bt.body =
+                "(" + PI360_remoteRun.toString() + ")(" +
+                jsString(tool.file.absoluteURI) + ", " +
+                jsString(tool.name) + ", " +
+                (tool.needsDocument  ? "true" : "false") + ", " +
+                (tool.needsSelection ? "true" : "false") + ");";
+
+            bt.onResult = function (message) {
+                finish(index, parseOutcome(message.body));
+            };
+
+            bt.onError = function (message) {
+                var detail = "";
+                try { detail = String(message.body); } catch (e) { detail = "No detail available."; }
+                finish(index, { status: "ERROR", message: "BridgeTalk could not run the tool.\n\n" + detail });
+            };
+
+            try {
+                bt.send();
+            } catch (err) {
+                finish(index, { status: "ERROR", message: describeError(err) });
+            }
+        }
+
+        /* ---- wiring ------------------------------------------------------ */
+        lb.onChange      = refreshAbout;
+        lb.onDoubleClick = runTool;
+        btnRun.onClick   = runTool;
+
+        btnClose.onClick = function () { w.close(); };
+
+        btnFolder.onClick = function () {
+            try { folder.execute(); }
+            catch (e) { alert("Could not open the tools folder.\n\n" + folder.fsName, APP_NAME); }
+        };
+
+        w.onClose = function () {
+            try { $.global.PREPRESS_I360_PANEL = null; } catch (e) {}
+            return true;
+        };
+
+        if (tools.length > 0) { lb.selection = 0; }
+        refreshAbout();
+
+        w.show();
+        return w;
+    }
+
+    /* =====================================================================
+     * DIALOG MODE
+     *
+     * Modal. Locks Illustrator while open, reopens after each run. Kept as the
+     * fallback: no BridgeTalk, no persistent engine, fewer moving parts.
+     * ================================================================== */
+
+    function showDialog(tools, state) {
         var w = new Window("dialog", APP_NAME + "  " + APP_VERSION);
         w.orientation   = "column";
         w.alignChildren = "fill";
         w.margins       = 16;
         w.spacing       = 10;
 
-        /* ---- tool list --------------------------------------------------- */
         var pTools = w.add("panel", undefined, "Tools");
         pTools.orientation   = "column";
         pTools.alignChildren = "fill";
@@ -409,22 +669,20 @@
 
         var i;
         for (i = 0; i < tools.length; i++) {
-            var t    = tools[i];
-            var item = lb.add("item", t.name);
-            item.subItems[0].text = needsText(t);
-            item.subItems[1].text = t.status;
+            var item = lb.add("item", tools[i].name);
+            item.subItems[0].text = needsText(tools[i]);
+            item.subItems[1].text = tools[i].status;
         }
 
-        /* ---- description ------------------------------------------------- */
         var pAbout = w.add("panel", undefined, "About the selected tool");
         pAbout.orientation   = "column";
         pAbout.alignChildren = "fill";
         pAbout.margins       = 14;
 
-        var about = pAbout.add("edittext", undefined, "", { multiline: true, readonly: true, scrolling: true });
+        var about = pAbout.add("edittext", undefined, "",
+            { multiline: true, readonly: true, scrolling: true });
         about.preferredSize.height = 190;
 
-        /* ---- session log ------------------------------------------------- */
         var pLog = w.add("panel", undefined, "This session");
         pLog.orientation   = "column";
         pLog.alignChildren = "fill";
@@ -435,32 +693,27 @@
             { multiline: true, readonly: true, scrolling: true });
         log.preferredSize.height = 80;
 
-        /* ---- buttons ----------------------------------------------------- */
         var row = w.add("group");
-        row.orientation = "row";
+        row.orientation   = "row";
         row.alignChildren = "center";
 
         var btnFolder = row.add("button", undefined, "Open tools folder");
-
         var spacer = row.add("group");
         spacer.alignment = ["fill", "center"];
-
-        var btnClose = row.add("button", undefined, "Close", { name: "cancel" });
+        var btnClose = row.add("button", undefined, "Close",    { name: "cancel" });
         var btnRun   = row.add("button", undefined, "Run tool", { name: "ok" });
 
-        /* ---- behaviour --------------------------------------------------- */
         var result = { action: "close" };
 
         function refreshAbout() {
             var sel = lb.selection;
             if (sel === null) {
-                about.text  = "Select a tool from the list above.";
+                about.text = "Select a tool from the list above.";
                 btnRun.enabled = false;
                 return;
             }
-            var tool = tools[sel.index];
-            about.text = describeTool(tool);
-            btnRun.enabled = tool.file.exists;
+            about.text = describeTool(tools[sel.index]);
+            btnRun.enabled = tools[sel.index].file.exists;
         }
 
         function chooseRun() {
@@ -491,6 +744,50 @@
         return result;
     }
 
+    /* In dialog mode the panel is already modal and running in Illustrator's
+     * context, so the tool is run directly. No BridgeTalk is involved. */
+    function dialogLoop(tools, folder) {
+        var state = { selectedIndex: 0, log: [], folder: folder };
+
+        while (true) {
+            var choice = showDialog(tools, state);
+            if (choice.action !== "run") { break; }
+
+            state.selectedIndex = choice.index;
+            var tool = choice.tool;
+
+            if (tool.caution !== "") {
+                var go = confirm(tool.name + "\n\n" + tool.caution + "\n\nRun it now?", true, APP_NAME);
+                if (!go) {
+                    state.log.push(tool.name + " - cancelled at the confirmation");
+                    continue;
+                }
+            }
+
+            var outcome;
+            try {
+                outcome = parseOutcome(PI360_remoteRun(
+                    tool.file.absoluteURI, tool.name,
+                    tool.needsDocument, tool.needsSelection));
+            } catch (err) {
+                outcome = { status: "ERROR", message: describeError(err) };
+            }
+
+            if (outcome.status === "OK") {
+                tool.status = "Ran " + timeStamp();
+                state.log.push(tool.name + " - finished " + timeStamp());
+            } else if (outcome.status === "BLOCKED") {
+                tool.status = "Not run";
+                state.log.push(tool.name + " - not run: requirements not met");
+                alert(outcome.message, APP_NAME);
+            } else {
+                tool.status = "Error";
+                state.log.push(tool.name + " - ERROR: " + outcome.message.split("\n")[0]);
+                alert(tool.name + " stopped with an error.\n\n" + outcome.message, APP_NAME);
+            }
+        }
+    }
+
     /* =====================================================================
      * Main
      * ================================================================== */
@@ -510,42 +807,21 @@
             return;
         }
 
-        var state = { selectedIndex: 0, log: [], folder: folder };
-
-        /* The list reopens after every run, so the operator can work straight
-         * down it without going back to the Scripts menu each time. */
-        while (true) {
-            var choice = showLauncher(tools, state);
-            if (choice.action !== "run") { break; }
-
-            state.selectedIndex = choice.index;
-            var tool = choice.tool;
-
-            var check = preflight(tool);
-            if (!check.ok) {
-                alert(check.message, APP_NAME);
-                state.log.push(tool.name + " - not run: requirements not met");
-                continue;
-            }
-
-            if (tool.caution !== "") {
-                var go = confirm(tool.name + "\n\n" + tool.caution + "\n\nRun it now?", true, APP_NAME);
-                if (!go) {
-                    state.log.push(tool.name + " - cancelled at the confirmation");
-                    continue;
-                }
-            }
-
-            var outcome = runTool(tool);
-            tool.status = outcome.label;
-
-            if (outcome.status === "error") {
-                state.log.push(tool.name + " - ERROR: " + outcome.message.split("\n")[0]);
-                alert(tool.name + " stopped with an error.\n\n" + outcome.message, APP_NAME);
-            } else {
-                state.log.push(tool.name + " - finished " + timeStamp());
-            }
+        if (PREPRESS_I360_PANEL_MODE === "dialog") {
+            dialogLoop(tools, folder);
+            return;
         }
+
+        /* Palette mode. Running the launcher again closes the panel that is
+         * already open and builds a fresh one, so an edit to the registry shows
+         * up without restarting Illustrator. */
+        try {
+            if ($.global.PREPRESS_I360_PANEL) {
+                $.global.PREPRESS_I360_PANEL.close();
+            }
+        } catch (e) {}
+
+        $.global.PREPRESS_I360_PANEL = showPalette(tools, folder);
     }
 
     try {
